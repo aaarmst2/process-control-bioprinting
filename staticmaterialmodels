@@ -1,0 +1,108 @@
+% Analyze laser scanner data for the pressure and velocity calibration
+% tests
+
+clear;
+N_=75; % number of Rows we crop out of the laser scanner .csv file 
+
+% Load scanner .csv files
+Test__=[table2array(readtable('ScanFile.csv', 'HeaderLines',N_)) ...
+    table2array(readtable('ScanFile2.csv', 'HeaderLines',N_)) ...
+    table2array(readtable('ScanFile3.csv', 'HeaderLines',N_)) ...
+    table2array(readtable('ScanFile4.csv', 'HeaderLines',N_))];
+% Change ranges to isolate material & crop point cloud
+range1=10;
+range2=700;
+range3=1;
+range4=1024;
+% Choose Z heights to crop 3D point cloud to isolate material & crop out
+% substrate 
+min_ht=-.86;
+max_ht=-.2;
+    
+Test=Test__(range1:range2,range3:range4);
+
+%% Project onto XY Plane
+delta_x=0.033;
+size_=size(Test);
+M=size_(2); % # of profile scans (columns) in Test
+N=size_(1); % # of data points along x axis (rows of Test)
+x_=delta_x*[0:1:N];
+x_=x_(1:N);
+vel=2.012;
+trig_int = 0.0164; % trigger interval between profiles, s. %varies depending on imaging setting. Access by using monitor connected to controller.
+delta_s=trig_int*vel; % mm
+s_=0:1:M;
+s_=delta_s*s_;
+s_=s_(1:M);
+[x,y]=meshgrid(x_,s_);
+x=x';
+y=y';
+
+sz=size(Test);
+for i=1:sz(1)
+    Test2=[Test(i,:)' s_'];
+    rotAngle = rot;%-pi/400;
+    Test2 = [Test2(:,1)*cos(rotAngle)-Test2(:,2)*sin(rotAngle) ...
+    (Test2(:,1)*sin(rotAngle) + Test2(:,2)*cos(rotAngle))];
+    Test_(i,:)=Test2(:,1)';
+end
+      
+Test= Test_;
+
+figure
+plot3(x,y,Test)
+zlim([min_ht max_ht])
+
+for i=1:N
+    for j=1:M
+        ht=Test(i,j);
+        if (ht>min_ht) && (ht<max_ht)
+            x__(i,j)=x_(i);
+            s__(i,j)=s_(j);
+        end
+    end
+end
+x__=x__';
+s__=s__';
+
+x__=x__(:);
+s__=s__(:);
+r=length(x__);
+is_zero=zeros(length(x__),1);
+for i=1:r
+    j=length(x__);
+    if x__(i)==0
+        is_zero(i)=1;
+    end
+end
+val=0;    
+case_=zeros(length(is_zero),1);
+for i=1:length(is_zero)
+    if is_zero(i)==val
+        case_(i)=i;
+        if val==1
+            val=0;
+        else
+            val=1;
+        end
+    end
+end
+% Remove zero points
+case_(case_==0)=[];
+for i=1:length(case_)-1
+    numb=mod(i,2);
+    if numb==1
+        if i==1
+            x_crop=x__(case_(i):case_(i+1)-1);
+            y_crop=s__(case_(i):case_(i+1)-1);
+        else
+            x_crop=[x_crop;x__(case_(i):case_(i+1)-1)];
+            y_crop=[y_crop;s__(case_(i):case_(i+1)-1)];
+        end
+    end
+end
+                
+Test=[x_crop y_crop];
+% Use the following figure to determine the material width for various
+% speed & pressure combinations 
+figure;plot(Test(:,1),Test(:,2), 'r.');axis equal
