@@ -1,0 +1,618 @@
+clear;
+
+%% Load Laser Scanner Data 
+N_=75; % Number of lines we will crop out of scanner data 
+
+% Read in scanner data, which is a 3 part .csv file
+% Output from Keyence LJ-G030 scanner
+Test__=[table2array(readtable('FileName1.csv', 'HeaderLines',N_)) ...
+table2array(readtable('FileName2.csv', 'HeaderLines',N_))...
+table2array(readtable('FileName3.csv', 'HeaderLines',N_))];
+
+% Info to crop Test matrix to desired range
+% Isolate material, these 4 values will be different for each scan 
+range1=180;
+range2=750;
+range3=50;
+range4=540;
+
+% Select these to crop out substrate, we just want to get scan data, not
+% substrate material is fabricated on. These values will vary 
+min_ht=-.52;
+max_ht=-.2;
+    
+Test=Test__(range1:range2,range3:range4);
+
+%% Load Axis data
+% a .m file that contains the reference path and axis behavior
+load 'AxisRefData'
+matfile=AxisRefData;
+t_=getfield(matfile.X,{1},'Data')'; 
+posx=getfield(matfile.Y,{2},'Data')';
+posy=getfield(matfile.Y,{8},'Data')';
+posz=getfield(matfile.Y,{3},'Data')';
+refx=getfield(matfile.Y,{6},'Data')';
+refy=getfield(matfile.Y,{10},'Data')';
+refz=getfield(matfile.Y,{7},'Data')';
+
+%% Project 3D matrix onto XY Plane
+delta_x=0.033; % spacing for laser scanner output 
+size_=size(Test);
+M=size_(2); % # of profile scans (columns) in Test
+N=size_(1); % # of data points along x axis (rows of Test)
+x_=delta_x*[0:1:N];
+x_=x_(1:N);
+vel=2.012;
+trig_int = 0.0164; % trigger interval between scanner profile output, in seconds
+delta_s=trig_int*vel; % mm
+s_=0:1:M;
+s_=delta_s*s_;
+s_=s_(1:M);
+[x,y]=meshgrid(x_,s_);
+x=x';
+y=y';
+
+% Plot 3D view 
+figure
+plot3(x,y,Test)
+zlim([min_ht max_ht])
+
+for i=1:N
+    for j=1:M
+        ht=Test(i,j);
+        if (ht>min_ht) && (ht<max_ht)
+            x__(i,j)=x_(i);
+            s__(i,j)=s_(j);
+        end
+    end
+end
+x__=x__';
+s__=s__';
+
+x__=x__(:);
+s__=s__(:);
+r=length(x__);
+is_zero=zeros(length(x__),1);
+for i=1:r
+    j=length(x__);
+    if x__(i)==0
+        is_zero(i)=1;
+    end
+end
+val=0;    
+case_=zeros(length(is_zero),1);
+for i=1:length(is_zero)
+    if is_zero(i)==val
+        case_(i)=i;
+        if val==1
+            val=0;
+        else
+            val=1;
+        end
+    end
+end
+% Remove zero points
+case_(case_==0)=[];
+for i=1:length(case_)-1
+    numb=mod(i,2);
+    if numb==1
+        if i==1
+            x_crop=x__(case_(i):case_(i+1)-1);
+            y_crop=s__(case_(i):case_(i+1)-1);
+        else
+            x_crop=[x_crop;x__(case_(i):case_(i+1)-1)];
+            y_crop=[y_crop;s__(case_(i):case_(i+1)-1)];
+        end
+    end
+end
+                
+Test=[x_crop y_crop];
+
+% Plot 2D Data 
+figure;plot(Test(:,1),Test(:,2), 'r.')
+axis equal
+
+%% Convert to raster data (binary image) 
+xlimits = [min(Test(:,1)), max(Test(:,1))];xlimits2=xlimits;
+ylimits = [min(Test(:,2)), max(Test(:,2))];ylimits2=ylimits;
+xlimits2=xlimits;ylimits2=ylimits;
+resolution=0.033;
+rasterSize = ceil([diff(ylimits)/resolution diff(xlimits)/resolution]);
+bw = false(rasterSize);
+% Convert x__/s__ coordinates into raster grid
+xgrid = round((Test(:,1)-xlimits(1))/diff(xlimits) * size(bw,2));
+ygrid = round((Test(:,2)-ylimits(1))/diff(ylimits) * size(bw,1));
+% Clamp
+xgrid = min(max(xgrid, 1), size(bw,2));
+ygrid = min(max(ygrid, 1), size(bw,1));
+
+lInd = sub2ind(size(bw),ygrid,xgrid);
+bw(lInd) = true;
+
+% load 'bw'
+sz=size(bw);
+rows_=sz(1);
+cols_=sz(2);
+
+% Make a boundary around image, make sure material doesnt hit edge of img
+for i=1:cols_
+    bw(1,i)=0;
+    bw(rows_,i)=0;
+end
+for i=1:rows_
+    bw(i,1)=0;
+    bw(i,cols_)=0;
+end
+
+%% Binary Image Operations
+numberToExtract = 1;
+% Fill Holes 
+bw = ExtractNLargestBlobs(bw, numberToExtract);
+% This 'ExtractNLargestBlobs' is as function from Matlab add ons
+
+bw2=imfill(bw,'holes'); %Incase there are holes
+
+SE = strel('disk',4);
+
+bw_ = imerode(bw2,SE);
+bw__ = imdilate(bw_,SE);
+figure;imshow(bw__)
+
+% Smooth out 
+windowSize=12;%10;
+kernel = ones(windowSize) / windowSize ^ 2;
+bw3 = conv2(single(bw__), kernel, 'same');
+bw4 = bw3 > 0.6;%0.55; % Rethreshold
+
+%% Find Edge 
+factor_=.5;
+bw__=edge(bw4,'sobel');
+[y_ed,x_ed]=find(bw__);
+
+%% Find Skeleton 
+skel = bwmorph(bw4,'thin',inf);
+
+% Remove spurs from skeleton estimate 
+[y_e,x_e] = find(bwmorph(skel, 'endpoints')); 
+[y_b,x_b] = find(bwmorph(skel, 'branchpoints')); 
+
+dist=zeros(length(y_e),1);
+dist_=zeros(length(y_e),1);
+skel2=skel;
+for i=1:length(y_b)
+    % Find closest endpoint to the current branchpoint
+    for j=1:length(y_e)
+        dist(j)=sqrt((y_b(i)-y_e(j))^2+(x_b(i)-x_e(j))^2);
+    end
+    dist_min=min(dist);
+    ind=find(dist==dist_min);
+    % Determine if there are more than one branches from the same
+    % branchpoint
+    dist_=dist(ind)-dist;
+    qq=zeros(length(dist_),1);
+    for q=1:length(dist_)
+        if (dist_(q)~=0) && (abs(dist_(q))<8)
+            qq(q)=1;
+        end
+    end
+    ind2=find(qq~=0);
+    if isempty(ind2)==0
+        % See if there is another branch point near by, if so, don't remove
+        % this other branch
+        case_=zeros(length(y_b),1);
+        for k=1:length(y_b)
+            dis_branch_pnt=sqrt((y_b(k)-y_b(i))^2+(x_b(k)-x_b(i))^2);
+            if (dis_branch_pnt<10) && (dis_branch_pnt~=0)
+                case_(k)=1;
+            end
+        end
+        case_(case_==0)=[];
+        if isempty(case_)==1 %then we do want to remove the other branch point
+            ind=[ind;ind2];
+        end
+    end
+    for k=1:length(ind)
+        % Determine if branch point is to L or R of end point
+        del_y=y_e(ind(k))-y_b(i);
+        del_x=x_e(ind(k))-x_b(i);
+        % Remove branches
+        if sign(del_y)<0 && sign(del_x)<0
+            skel2(y_e(ind(k)):y_b(i),x_e(ind(k)):x_b(i))=0;
+        elseif sign(del_y)>0 && sign(del_x)<0
+            skel2(y_b(i):y_e(ind(k)),x_e(ind(k)):x_b(i))=0;
+        elseif sign(del_y)>0 && sign(del_x)>0
+            skel2(y_b(i):y_e(ind(k)),x_b(i):x_e(ind(k)))=0;
+        elseif sign(del_y)<0 && sign(del_x)>0
+            skel2(y_e(ind(k)):y_b(i),x_b(i):x_e(ind(k)))=0;
+        elseif del_y==0
+            if sign(del_x)>0
+                skel2(y_e(ind(k)),x_b(i):x_e(ind(k)))=0;
+            else
+                skel2(y_e(ind(k)),x_e(ind(k)):x_b(i))=0;
+            end
+        elseif del_x==0
+            if sign(del_y)>0
+                skel2(y_b(i):y_e(ind(k)),x_e(ind(k)))=0;
+            else
+                skel2(y_e(ind(k)):y_b(i),x_e(ind(k)))=0;
+            end
+        end
+    end
+end
+[y_skel,x_skel]=find(skel2);
+
+% Reorder skel
+data=[x_skel y_skel];
+data=unique(data,'rows','stable');
+dist = pdist2(data,data);
+N = size(data,1);
+result = NaN(1,N);
+
+% Find starting index of skel
+zero_=[1 1];
+
+distances_=dsearchn(data,zero_);
+result(1)=distances_;
+for ii=2:N
+    dist(:,result(ii-1)) = Inf;
+    [~, closest_idx] = min(dist(result(ii-1),:));
+    result(ii) = closest_idx;
+end
+skel_sort=data(result,:);
+skel_sort=[skel_sort(:,1) skel_sort(:,2)];
+
+%% Reorder edge
+data=[x_ed y_ed];
+dist = pdist2(data,data);
+N = size(data,1);
+result = NaN(1,N);
+distances_2=dsearchn(data,zero_);
+result(1)=distances_2; % first point is first row in data matrix
+for ii=2:N
+    dist(:,result(ii-1)) = Inf;
+    [~, closest_idx] = min(dist(result(ii-1),:));
+    result(ii) = closest_idx;
+end
+edge_sort=data(result,:);
+
+%% Smooth skel & edge 
+x=smooth(skel_sort(:,1));
+y=smooth(skel_sort(:,2));
+
+smooth_edgeX=smooth(edge_sort(:,1),20);
+smooth_edgeY=smooth(edge_sort(:,2),20);
+edge_sm=[smooth_edgeX,smooth_edgeY];
+
+%% Interpolate skel
+% Just to have more data points along the path 
+data=[x y];
+data=unique(data,'rows','stable');
+x=data(:,1);y=data(:,2);
+total_length = arclength(x,y,'spline');
+del_=total_length/20000;
+Path_new=interparc(0:(del_/total_length):1,x,y,'spline');
+smoothX=Path_new(1:end-1,1);
+smoothY=Path_new(1:end-1,2);
+
+%% Convert skel & edge to world coordinates
+xskel = smoothX/size(bw,2)*diff(xlimits) + xlimits(1);
+yskel = smoothY/size(bw,1)*diff(ylimits) + ylimits(1);
+ 
+x_=edge_sm(:,1);
+y_=edge_sm(:,2);
+xedge = x_/size(bw,2)*diff(xlimits) + xlimits(1);
+yedge = y_/size(bw,1)*diff(ylimits) + ylimits(1);
+
+%% Rotate & recenter skel & edge 
+edge=[yedge xedge];
+skel_wc=[yskel xskel];
+zero_pnt=skel_wc(1,:);
+edge=edge-zero_pnt;
+skel_wc=skel_wc-zero_pnt;
+
+total_length = arclength(edge(:,1),edge(:,2),'spline');
+del_=total_length/(2*length(edge(:,1)));
+Path_new=interparc(0:(del_/total_length):1,edge(:,1),edge(:,2),'spline');
+xedge=Path_new(1:end-1,1);
+yedge=Path_new(1:end-1,2);
+edge=[xedge yedge];
+
+%% Split edge into inner & outer paths
+%%%%% SIDE ONE 
+del_x=skel_wc(2,1)-skel_wc(1,1);
+x_pnt=skel_wc(1,1);
+thresh=.01;
+for i=1:40
+    new_pnt=[x_pnt skel_wc(1,2)];
+   [k1,dist]= dsearchn(edge,new_pnt);
+    if dist<thresh
+        break
+    end
+    x_pnt=x_pnt-del_x;
+end
+
+%%%%% SIDE TWO
+del_x=skel_wc(end,1)-skel_wc(end-1,1);
+x_pnt=skel_wc(end,1);
+for i=1:40
+    new_pnt=[x_pnt skel_wc(end,2)];
+   [k2,dist]= dsearchn(edge,new_pnt);
+    if dist<thresh
+        break
+    end
+    x_pnt=x_pnt+del_x;
+end
+    
+%%%%%%% split edge at k1 and k2 
+if k1>k2
+    endd=length(edge);
+    edge1=[edge(k1:end,:);edge(1:k2,:)];
+    edge2=edge(k2+1:k1-1,:);
+    edge2=flipud(edge2);
+else
+    endd=length(edge);
+    edge1=edge(k1:k2,:);
+    edge2=[edge(k2+1:endd,:);edge(1:k1-1,:)];
+    edge2=flipud(edge2);
+end
+ 
+%% Find centerline & width
+% Need to know when reference switches direction to switch inner & outer
+% paths. This is known apriori from reference path
+start=3616;
+end__=4099;
+ref_turns=start;
+for i=1:14
+    ref_turns=[ref_turns;start+4099];
+    start=start+end__;
+end
+% Now find closest edge points to these 
+indexx=zeros(length(ref_turns),1);
+for i=1:length(ref_turns)
+    pnt=[refx(ref_turns(i)) refy(ref_turns(i))];
+    idx_=dsearchn(edge1,pnt);
+    indexx(i)=idx_;
+end
+indexx_=indexx+200;indexx_=indexx_(1:end-1);
+
+thresh=0.05;
+center_line_=[];
+width_=[];
+    
+for i=1:length(indexx_)+1
+    del=.01;
+    del_=del;
+    
+    if i==1
+        start1=1;
+        start2=1;
+    else
+        start1=indexx_(i-1)+1;
+        start2=temp_index+1;
+    end
+    % Define temp edge regions 
+    if i==length(indexx_)+1
+        edge__temp1=edge1(start1:end,:);
+        edge__temp2=edge2(start2:end,:);
+    else
+        edge__temp1=edge1(start1:indexx_(i),:);
+        temp_index=dsearchn(edge2,edge__temp1(end,:));
+        edge__temp2=edge2(start2:temp_index,:);
+    end
+    
+    % Interpolate so they are the same size. 
+    leng_1=length(edge__temp1(:,1));
+    leng_2=length(edge__temp2(:,1));
+    
+    if leng_1>leng_2
+        temp1 = interp1(1:length(edge__temp2(:,1)), edge__temp2(:,1), linspace(1, length(edge__temp2(:,1)), length(edge__temp1(:,1))), 'nearest');
+        temp2 = interp1(1:length(edge__temp2(:,2)), edge__temp2(:,2), linspace(1, length(edge__temp2(:,2)), length(edge__temp1(:,2))), 'nearest');
+        edge__temp2=[temp1' temp2'];
+    else
+        temp1 = interp1(1:length(edge__temp1(:,1)), edge__temp1(:,1), linspace(1, length(edge__temp1(:,1)), length(edge__temp2(:,1))), 'nearest');
+        temp2 = interp1(1:length(edge__temp1(:,2)), edge__temp1(:,2), linspace(1, length(edge__temp1(:,2)), length(edge__temp2(:,2))), 'nearest');
+        edge__temp1=[temp1' temp2'];
+    end
+    
+    if i==1
+        figure;
+    end
+    plot(edge__temp1(:,1),edge__temp1(:,2),'r.');hold on;plot(edge__temp2(:,1),edge__temp2(:,2),'g.')
+    axis equal
+    
+    % Which one is inner. 
+    e_o=rem(i,2);
+    % Odd i - edge 2 is inner. Even i - edge 1 is inner.
+    %%%%% for i = 1, edge 2 is inner 
+    if e_o==1
+        Vertices=edge__temp2;
+        edge_comp=edge__temp1;
+    else
+        Vertices=edge__temp1;
+        edge_comp=edge__temp2;
+    end
+    
+    Lines=[(1:size(Vertices,1))' (2:size(Vertices,1)+1)'];Lines(end,2)=1;
+    N=LineNormals2D(Vertices,Lines);
+    center=zeros(length(edge__temp1(:,1)),2);
+    width=zeros(length(edge__temp1(:,1)),1);
+    case__=zeros(length(edge__temp1(:,1)),1);
+    
+    if i==1 
+        start_=50;
+    else
+        start_=1;
+    end
+    
+    if i==length(indexx_)+1
+        end_=length(edge__temp1(:,1))-40;
+    else
+        end_=length(edge__temp1(:,1));
+    end
+    
+    for q=start_:end_
+        start_pnt=[Vertices(q,1) Vertices(q,2)]; %hold on;plot(start_pnt(:,1),start_pnt(:,2),'k*')
+        for j=1:800
+            if e_o==0
+                new_pnt=[Vertices(q,1)-del_*N(q,1) Vertices(q,2)-del_*N(q,2)];
+            else
+                new_pnt=[Vertices(q,1)+del_*N(q,1) Vertices(q,2)+del_*N(q,2)];
+            end
+            %hold on;plot(new_pnt(1),new_pnt(2),'r*')
+            k1=dsearchn(edge_comp,new_pnt);
+            dist_temp1=sqrt((edge_comp(k1,1)-new_pnt(1))^2+(edge_comp(k1,2)-new_pnt(2))^2);
+            if dist_temp1<thresh
+                break
+            end
+            del_=del_+del;
+            if j==800
+                case__(q,1)=1;
+                red=1;
+            end
+        end
+        % Calc mid point
+        mid_pnt=[(edge_comp(k1,1)+start_pnt(1))/2 (edge_comp(k1,2)+start_pnt(2))/2];
+        hold on;plot(mid_pnt(1),mid_pnt(2),'k.')
+
+        center(q,:)=mid_pnt;
+        width(q)=sqrt((edge_comp(k1,1)-start_pnt(1))^2+(edge_comp(k1,2)-start_pnt(2))^2);
+        
+        del_=del;
+    end
+    
+    if i==1
+        center_line=center;
+        width_=width;
+    else
+        center_line=[center_line;center];
+        width_=[width_;width];
+    end
+    
+end
+
+start_=50;
+end_=length(center_line)-40;
+width_=width_(start_:end_);
+center_line=center_line(start_:end_,:);
+center_line=flipud(center_line);
+
+tempx=smooth(center_line(:,1));tempy=smooth(center_line(:,2));
+center_line=[tempx tempy];
+center_line=flipud(center_line);
+width_=flipud(width_);
+
+%% Zero centerline and edge
+zero_=center_line(1,:);
+edge=edge-center_line(1,:);
+center_line=center_line-center_line(1,:);
+
+figure;plot(refx,refy,'k.');hold on;
+plot(posx,posy,'c.');hold on;plot(center_line(:,1),center_line(:,2),'r.')
+legend('ref','axes','material')
+
+% Plot edge & centerline to check 
+figure;plot(edge(:,1),edge(:,2),'r.');
+hold on;plot(center_line(:,1),center_line(:,2),'g.')
+hold on;plot(refx,refy,'k--');axis equal
+xlabel('x (mm)');ylabel('y (mm)')
+set(gca,'FontSize',15)
+
+%% Interpolate centerline & width 
+% to be same size as ref 
+leng_=length(refx);
+width__ = interp1(1:length(width_), width_, linspace(1, length(width_), leng_), 'nearest');
+width__=width__';
+
+center_line=unique(center_line,'rows','stable');
+total_length = arclength(center_line(:,1),center_line(:,2),'spline');
+del_=total_length/length(refx);
+Path_new=interparc(0:(del_/total_length):1,center_line(:,1),center_line(:,2),'spline');
+matx=Path_new(1:end-1,1);
+maty=Path_new(1:end-1,2);
+mat_=[matx maty];
+
+%% Calc 1D Error 
+k2=zeros(leng_,1);
+errx_=zeros(leng_,1);
+erry_=zeros(leng_,1);
+ref=[refx refy];
+
+for i=1:leng_
+    % Walk through ref and just find closest material point
+    pnt_ref=[refx(i),refy(i)];
+    k2(i)=dsearchn(mat_,pnt_ref);
+    dist_temp=abs(i-k2(i));
+    if dist_temp>=1000
+        mat_temp=mat_(i-200:i+200,:);
+        tempp=dsearchn(mat_temp,pnt_ref);
+        k2(i)=find(mat_==mat_temp(tempp));
+    end
+    % Calc 1D error 
+    Err1D(i)=sqrt((pnt_ref(1)-mat_(k2(i),1))^2+(pnt_ref(2)-mat_(k2(i),2))^2);
+    errx_(i)=pnt_ref(1)-mat_(k2(i),1);
+    erry_(i)=pnt_ref(2)-mat_(k2(i),2); 
+end
+
+%% 2D error 
+NS = .5; % Nozzle size
+
+Err2D=abs(NS*ones(length(width__),1)-width__);
+
+
+%% 1D Error Plot
+figure
+scatter(refx,refy,25,Err1D,'filled');
+hold on;plot(refx,refy,'k--');
+xlabel('X (mm)'); ylabel('Y (mm)');
+title('1D Error')
+set(gca,'FontSize',18)
+c=hot; 
+c=flipud(c);
+colormap(c);
+
+%% 2D Error Plot
+figure
+scatter(refx,refy,25,Err2D,'filled');
+hold on;plot(refx,refy,'k--');
+xlabel('X (mm)'); ylabel('Y (mm)')
+title('2D Error')
+set(gca,'FontSize',18)
+c=hot; 
+c=flipud(c);
+colormap(c);
+colorbar
+
+%% Modify control inputs 
+% Axes motion
+% Learning gain - Le, how much of the error do you want to use, [0,1] 
+Le = 1;
+ref_x_mod=refx+Le*errx_;
+ref_y_mod=refy+Le*erry_;
+ref_x_mod2=smooth(ref_x_mod,30); % smooth out
+ref_y_mod2=smooth(ref_y_mod,30);
+figure;plot(refx,refy,'k--')
+hold on;plot(ref_x_mod2,ref_y_mod2,'g.')
+axis equal
+xlabel('x (mm)');ylabel('y (mm)')
+set(gca,'FontSize',15)
+legend('Ref Orig','Ref Corr Smoothed')
+
+%% Modify Pressure inputs
+% Shut pressure off a few time steps before turn arounds 
+
+Pr=9; % pressure value used for original print 
+del_P = 2; % determined by material tests 
+time_delay = 60; % time steps before turnaround point to accomodate for 
+                 % material time delay determined by material tests 
+
+pressure=Pr*ones(length(ref_x_mod),1);
+% these index points represent each turnaround point 
+pr_idx=[3616,4100,7715,8199,11814,12298,15913,16397,...
+    20012,20496,24111,24595,28210,28694,32309,32793,36408,...
+    36892,40507,40991,44606,45090,48705,49189,52804,...
+    53288,56903,57387,61002,61486];
+    
+for i=1:2:29
+    pressure(pr_idx(i)-time_delay:pr_idx(i+1)-time_delay)=Pr-del_P;
+end
+figure;plot(pressure,'r.')
