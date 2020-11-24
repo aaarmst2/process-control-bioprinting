@@ -1,0 +1,141 @@
+%clear;
+
+% Load 'Test' matrix, scanner data from 'readscannerdata'
+load 'Test'
+
+%% Fit a circle or ellipse to each cross section 
+% Remove straight parts
+Diam=zeros(length(Test),1);
+EllipseInfo=zeros(length(Test),4);
+delta=.0328;
+thresh=.04;
+
+for i=1:length(Test) 
+    Xcross=x(:,i);
+    Zcross=Test(:,i);
+    
+    Temp=[Xcross Zcross];
+
+%     figure;plot(Xcross,Zcross,'r.')
+%     hold on;plot(Temp(:,1),Temp(:,2),'b.')
+    
+    Xcross=Temp(:,1);
+    Zcross=Temp(:,2);
+    Zcross=Zcross-Zcross(1);
+    
+    % Remove straight parts 
+    threshold=.009;
+    for q=1:(length(x_)-1)
+        delta=Zcross(q+1)-Zcross(q);
+        if delta>threshold
+            start=q;
+            break
+        end
+    end
+    for q=1:(length(x_)-1)
+        delta=Zcross(end-q)-Zcross(end-(q-1));
+        if delta>threshold
+            end_=length(Zcross)-(q-1);
+            break
+        end
+    end
+    Xcross=Xcross(start:end_);
+    Xcross=Xcross-Xcross(1);
+    Zcross=Zcross(start:end_);
+
+    % Find midpoint
+    mid_pnt=Xcross(end)/2;
+    idx=dsearchn(Xcross,mid_pnt);
+    Xcross=Xcross-Xcross(idx);
+
+%     figure;plot(Xcross,Zcross,'k.')
+
+    %%%% Fit Ellipse
+    pnt=[Xcross(idx)-delta Zcross(idx)/2];
+    rod=[Xcross Zcross];
+    for q=1:100
+        [k,dist]=dsearchn(rod,pnt);
+        if dist<thresh
+            break
+        end
+        pnt(1)=pnt(1)-delta;
+    end
+    % Ellipse parameters
+    EllipseInfo(i,2)=Zcross(idx)/2; % b
+    EllipseInfo(i,1)=Xcross(idx)-Xcross(k); % a
+    EllipseInfo(i,3)=Xcross(idx);
+    EllipseInfo(i,4)=Zcross(idx)/2;
+
+end
+
+%% Convert ellipse data to output flow rate 
+
+% Ref material flow rate
+Pr=10; % desired pressure
+vel=2; % desired velocity
+tfinal=4; % length of reference movement, in seconds
+t=0:.001:tfinal;
+Q=(vel*pi*(.4/2)^2)*ones(length(t),1);
+Q(1)=0;Q(3501:end)=0; % shut pressure off 1/2 sec before end of movement
+figure;plot(t,Q,'r')
+
+% Data from material calibration tests
+delay_t=.1168; % time delay 
+L=7.8861; % Material rod length 
+del_t=L/vel;
+dt=del_t/length(Ellipse);
+t_init=0:dt:delay_t;
+
+% Cross sectional area at each laser stripe
+Ac=pi*EllipseInfo(:,1).*EllipseInfo(:,2);
+Qout=Ac*vel;
+
+t2=linspace(0,del_t,length(EllipseInfo));
+t_final=t2+t_init(end)+dt;
+t_final=[t_init';t_final'];
+NN=length(t_final)-length(Qout);
+Qout=[zeros(NN,1);Qout];
+hold on;plot(t_final,Qout,'.')
+
+% Total cross sectional area along rod
+for i=1:length(Diam1)
+    if i==1
+        Ae=pi*EllipseInfo1(i,1)*EllipseInfo1(i,2);
+    else
+        Ae=Ae+pi*EllipseInfo1(i,1)*EllipseInfo1(i,2);
+    end
+end
+
+% output material flow rate
+Qout=Ae*vel;
+
+
+figure;plot(t,Q,'k--')
+hold on;plot(t,Qout,'r.')
+
+ref=[t' Q];
+Ts=ref(5,1)-ref(4,1);
+
+% Fit Transfer Function to data
+data = iddata(Qout,ref(:,2),Ts); 
+type = 'P1D';
+sys_est = procest(data,type);
+Kp=sys_est.Kp;
+Tp1=sys_est.Tp1;
+Td=sys_est.Td;
+s=tf('s');
+sys=(Kp/(1+Tp1*s))*exp(-Td*s);
+
+out_data=lsim(sys,ref(:,2),ref(:,1));
+
+figure;plot(ref(:,1),ref(:,2),'k--')
+hold on;
+plot(ref(:,1),out_data,'b.')
+xlabel('time (s)');ylabel('Output flow rate (mm^3/s)')
+
+% Feel free to tweak the transfer function parameters to improve model fit
+% Example shown below 
+s=tf('s');
+sys2=(.5606/(.2*s+1))*exp(-.77*s);
+out_data2=lsim(sys2,ref(:,2),ref(:,1));
+plot(ref(:,1),out_data2,'g.')
